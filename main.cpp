@@ -1,154 +1,304 @@
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <cmath>
-#include <cstdlib>
-#include <ctime>
+#include <iostream>
 
-// Particle structure representing individual firework particles
-struct Particle {
+// Rope configuration
+struct RopeConfig
+{
+    static constexpr int NUM_POINTS = 40;            // Number of points in rope
+    static constexpr float POINT_SPACING = 15.0f;    // Space between points
+    static constexpr float GRAVITY = 1000.0f;        // Gravity strength
+    static constexpr float POINT_SIZE = 0.0f;        // Visual size of points
+    static constexpr int CONSTRAINT_ITERATIONS = 50; // Physics iteration count
+    static constexpr float DAMPING = 1.0f;           // Velocity damping (1.0 = no damping)
+    static constexpr float START_X = 400.0f;         // Starting X position
+    static constexpr float START_Y = 100.0f;         // Starting Y position
+    static constexpr float ROPE_THICKNESS = 2.0f;    // Thickness of the rope
+};
+
+struct ShaderConfig
+{
+    static constexpr float DEFAULT_PIXEL_SIZE = 5.0f;
+    static constexpr float DEFAULT_CRT_CURVE = 0.0f;
+    static constexpr float DEFAULT_SCANLINE = 0.2f;
+    static constexpr float DEFAULT_CHROMATIC = 0.3f;
+};
+
+class Point
+{
+public:
+    sf::Vector2f position;
+    sf::Vector2f oldPosition;
+    bool isLocked;
+
+    Point(float x, float y, bool locked = false)
+        : position(x, y), oldPosition(x, y), isLocked(locked) {}
+
+    void update(float dt)
+    {
+        if (!isLocked)
+        {
+            sf::Vector2f velocity = (position - oldPosition) * RopeConfig::DAMPING;
+            oldPosition = position;
+            position += velocity + sf::Vector2f(0.0f, RopeConfig::GRAVITY) * (dt * dt);
+        }
+    }
+};
+
+class Stick
+{
+public:
+    Point *pointA;
+    Point *pointB;
+    float length;
+
+    Stick(Point *a, Point *b) : pointA(a), pointB(b)
+    {
+        length = std::sqrt(pow(a->position.x - b->position.x, 2) +
+                           pow(a->position.y - b->position.y, 2));
+    }
+
+    void solve()
+    {
+        sf::Vector2f delta = pointB->position - pointA->position;
+        float currentLength = std::sqrt(delta.x * delta.x + delta.y * delta.y);
+        float diff = (currentLength - length) / currentLength;
+
+        if (!pointA->isLocked)
+            pointA->position += delta * 0.5f * diff;
+        if (!pointB->isLocked)
+            pointB->position -= delta * 0.5f * diff;
+    }
+};
+
+class Obstacle
+{
+public:
     sf::CircleShape shape;
-    sf::Vector2f velocity;
-    float lifespan; // Lifespan in seconds
+    float radius;
 
-    Particle(sf::Vector2f position, sf::Vector2f velocity, sf::Color color, float lifespanDuration) {
-        shape.setPosition(position);
-        shape.setRadius(2.f);
-        shape.setFillColor(color);
-        shape.setOrigin(2.f, 2.f); // Center the circle
-        this->velocity = velocity;
-        this->lifespan = lifespanDuration;
+    Obstacle(float x, float y, float r) : radius(r)
+    {
+        shape.setRadius(r);
+        shape.setPosition(x, y);
+        shape.setFillColor(sf::Color::Red);
+        shape.setOrigin(r, r);
     }
 
-    void update(float dt) {
-        // Update position based on velocity
-        shape.move(velocity * dt);
-        // Apply gravity (pixels/s²)
-        velocity.y += 98.1f * dt;
-        // Decrease lifespan
-        lifespan -= dt;
+    bool checkCollision(Point &point)
+    {
+        sf::Vector2f center = shape.getPosition();
+        sf::Vector2f diff = point.position - center;
+        float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+
+        if (dist < radius)
+        {
+            float angle = std::atan2(diff.y, diff.x);
+            point.position.x = center.x + std::cos(angle) * radius;
+            point.position.y = center.y + std::sin(angle) * radius;
+            return true;
+        }
+        return false;
     }
 };
 
-// Firework structure managing a collection of particles
-struct Firework {
-    std::vector<Particle> particles;
-    bool exploded;
-    sf::Vector2f explosionPosition;
+int main()
+{
+    sf::RenderWindow window(sf::VideoMode(800, 600), "Verlet Rope Simulation");
+    window.setFramerateLimit(100);
 
-    Firework(sf::Vector2f position) : exploded(false), explosionPosition(position) {
-        // Initial upward velocity for the rocket
-        sf::Vector2f velocity(0.f, -300.f);
-        // Create the initial rocket particle
-        particles.emplace_back(position, velocity, sf::Color::White, 2.f);
+    // Initialize shader and render texture
+    sf::Shader shader;
+    if (!shader.loadFromFile("combined.frag", sf::Shader::Fragment))
+    {
+        std::cout << "Error loading shader\n";
+        return -1;
     }
 
-    void update(float dt) {
-        if (!exploded) {
-            // Update the rocket
-            particles[0].update(dt);
-            // Check if the rocket should explode (when velocity.y >= 0)
-            if (particles[0].velocity.y >= 0.f) {
-                explode();
-            }
-        } else {
-            // Update all explosion particles
-            for (auto it = particles.begin(); it != particles.end(); ) {
-                it->update(dt);
-                if (it->lifespan <= 0.f) {
-                    it = particles.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
+    sf::RenderTexture renderTexture;
+    if (!renderTexture.create(800, 600))
+    {
+        std::cout << "Error creating render texture\n";
+        return -1;
     }
 
-    void explode() {
-        exploded = true;
-        // Store the explosion position before removing the rocket
-        explosionPosition = particles[0].shape.getPosition();
-        // Remove the rocket particle
-        particles.erase(particles.begin());
-
-        // Generate explosion particles
-        int numParticles = 100;
-        for (int i = 0; i < numParticles; ++i) {
-            float angle = static_cast<float>(std::rand()) / RAND_MAX * 2 * static_cast<float>(M_PI);
-            float speed = static_cast<float>(std::rand()) / RAND_MAX * 200.f + 50.f;
-            sf::Vector2f velocity(std::cos(angle) * speed, std::sin(angle) * speed);
-
-            sf::Color color = sf::Color(std::rand() % 256, std::rand() % 256, std::rand() % 256);
-
-            particles.emplace_back(explosionPosition, velocity, color, 2.f);
-        }
-    }
-
-    bool isFinished() const {
-        return exploded && particles.empty();
-    }
-};
-
-int main() {
-    // Initialize random seed
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
-
-    // Create the main SFML window
-    sf::RenderWindow window(sf::VideoMode(800, 600), "Fireworks Simulation");
-    window.setFramerateLimit(60);
-
-    // Vector to hold all active fireworks
-    std::vector<Firework> fireworks;
-
-    // Clock to track delta time
+    float pixelSize = ShaderConfig::DEFAULT_PIXEL_SIZE;
+    float crtCurve = ShaderConfig::DEFAULT_CRT_CURVE;
+    float scanlineIntensity = ShaderConfig::DEFAULT_SCANLINE;
+    float chromaticIntensity = ShaderConfig::DEFAULT_CHROMATIC;
     sf::Clock clock;
 
-    while (window.isOpen()) {
-        // Calculate delta time
-        float dt = clock.restart().asSeconds();
+    shader.setUniform("resolution", sf::Vector2f(800, 600));
+    shader.setUniform("pixel_size", pixelSize);
+    shader.setUniform("crt_curve", crtCurve);
+    shader.setUniform("scanline_intensity", scanlineIntensity);
+    shader.setUniform("chromatic_intensity", chromaticIntensity);
 
-        // Handle events
+    // Create rope
+    std::vector<Point> points;
+    std::vector<Stick> sticks;
+
+    // Initialize points using constants
+    for (int i = 0; i < RopeConfig::NUM_POINTS; i++)
+    {
+        points.emplace_back(RopeConfig::START_X,
+                            RopeConfig::START_Y + i * RopeConfig::POINT_SPACING,
+                            i == 0);
+    }
+
+    // Create sticks between points
+    for (int i = 0; i < RopeConfig::NUM_POINTS - 1; i++)
+    {
+        sticks.emplace_back(&points[i], &points[i + 1]);
+    }
+
+    // Create obstacles
+    std::vector<Obstacle> obstacles;
+    obstacles.emplace_back(400, 300, 50);
+    obstacles.emplace_back(300, 400, 40);
+
+    // Simulation variables
+    const float dt = 1.0f / 100.0f;
+    const int iterations = RopeConfig::CONSTRAINT_ITERATIONS;
+    bool isDragging = false;
+
+    while (window.isOpen())
+    {
         sf::Event event;
-        while (window.pollEvent(event)) {
-            // Close window event
+        while (window.pollEvent(event))
+        {
             if (event.type == sf::Event::Closed)
                 window.close();
-
-            // Launch a firework on left mouse button click
-            if (event.type == sf::Event::MouseButtonPressed) {
-                if (event.mouseButton.button == sf::Mouse::Left) {
-                    sf::Vector2f position(static_cast<float>(event.mouseButton.x), static_cast<float>(event.mouseButton.y));
-                    fireworks.emplace_back(position);
+            else if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left)
+            {
+                isDragging = true;
+            }
+            else if (event.type == sf::Event::MouseButtonReleased && event.mouseButton.button == sf::Mouse::Left)
+            {
+                isDragging = false;
+            }
+            else if (event.type == sf::Event::KeyPressed)
+            {
+                switch (event.key.code)
+                {
+                case sf::Keyboard::Up:
+                    pixelSize = std::min(pixelSize + 1.0f, 32.0f);
+                    shader.setUniform("pixel_size", pixelSize);
+                    break;
+                case sf::Keyboard::Down:
+                    pixelSize = std::max(pixelSize - 1.0f, 1.0f);
+                    shader.setUniform("pixel_size", pixelSize);
+                    break;
+                case sf::Keyboard::Q:
+                    crtCurve = std::min(crtCurve + 0.1f, 1.0f);
+                    shader.setUniform("crt_curve", crtCurve);
+                    break;
+                case sf::Keyboard::A:
+                    crtCurve = std::max(crtCurve - 0.1f, 0.0f);
+                    shader.setUniform("crt_curve", crtCurve);
+                    break;
+                case sf::Keyboard::W:
+                    scanlineIntensity = std::min(scanlineIntensity + 0.1f, 1.0f);
+                    shader.setUniform("scanline_intensity", scanlineIntensity);
+                    break;
+                case sf::Keyboard::S:
+                    scanlineIntensity = std::max(scanlineIntensity - 0.1f, 0.0f);
+                    shader.setUniform("scanline_intensity", scanlineIntensity);
+                    break;
+                case sf::Keyboard::E:
+                    chromaticIntensity = std::min(chromaticIntensity + 0.1f, 1.0f);
+                    shader.setUniform("chromatic_intensity", chromaticIntensity);
+                    break;
+                case sf::Keyboard::D:
+                    chromaticIntensity = std::max(chromaticIntensity - 0.1f, 0.0f);
+                    shader.setUniform("chromatic_intensity", chromaticIntensity);
+                    break;
                 }
             }
         }
 
-        // Update all fireworks
-        for (auto it = fireworks.begin(); it != fireworks.end(); ) {
-            it->update(dt);
-            if (it->isFinished()) {
-                it = fireworks.erase(it);
-            } else {
-                ++it;
+        // Update anchor point position to mouse position when dragging
+        if (isDragging)
+        {
+            sf::Vector2i mousePos = sf::Mouse::getPosition(window);
+            points[0].position = window.mapPixelToCoords(mousePos);
+            points[0].oldPosition = points[0].position;
+        }
+
+        // Update points
+        for (auto &point : points)
+        {
+            point.update(dt);
+        }
+
+        // Solve constraints
+        for (int i = 0; i < iterations; i++)
+        {
+            for (auto &stick : sticks)
+            {
+                stick.solve();
+            }
+
+            // Check obstacle collisions
+            for (auto &point : points)
+            {
+                for (auto &obstacle : obstacles)
+                {
+                    obstacle.checkCollision(point);
+                }
             }
         }
 
-        // Optionally, launch fireworks automatically at random intervals
-        if (std::rand() % 100 < 2) { // Adjust probability as needed
-            sf::Vector2f position(static_cast<float>(std::rand() % window.getSize().x), static_cast<float>(window.getSize().y));
-            fireworks.emplace_back(position);
+        // Render to texture
+        renderTexture.clear(sf::Color::Black);
+
+        // Draw obstacles to texture
+        for (const auto &obstacle : obstacles)
+        {
+            renderTexture.draw(obstacle.shape);
         }
 
-        // Clear the window with black color (night sky)
-        window.clear(sf::Color::Black);
+        // Draw sticks to texture (thick lines)
+        for (const auto &stick : sticks)
+        {
+            sf::Vector2f direction = stick.pointB->position - stick.pointA->position;
+            float length = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+            if (length > 0)
+            {
+                direction /= length;
+                sf::Vector2f normal(-direction.y, direction.x);
+                normal *= RopeConfig::ROPE_THICKNESS;
 
-        // Draw all particles of all fireworks
-        for (const auto& firework : fireworks) {
-            for (const auto& particle : firework.particles) {
-                window.draw(particle.shape);
+                sf::ConvexShape line;
+                line.setPointCount(4);
+                line.setPoint(0, stick.pointA->position + normal);
+                line.setPoint(1, stick.pointB->position + normal);
+                line.setPoint(2, stick.pointB->position - normal);
+                line.setPoint(3, stick.pointA->position - normal);
+                line.setFillColor(sf::Color::White);
+                renderTexture.draw(line);
             }
         }
 
-        // Display the rendered frame on screen
+        // Draw points to texture
+        for (const auto &point : points)
+        {
+            sf::CircleShape circle(RopeConfig::POINT_SIZE);
+            circle.setFillColor(sf::Color::White);
+            circle.setPosition(point.position);
+            circle.setOrigin(RopeConfig::POINT_SIZE, RopeConfig::POINT_SIZE);
+            renderTexture.draw(circle);
+        }
+
+        renderTexture.display();
+
+        // Final render with shader
+        window.clear();
+        sf::Sprite sprite(renderTexture.getTexture());
+        shader.setUniform("texture", sf::Shader::CurrentTexture);
+        shader.setUniform("time", clock.getElapsedTime().asSeconds());
+        window.draw(sprite, &shader);
         window.display();
     }
 
