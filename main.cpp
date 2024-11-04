@@ -1,306 +1,535 @@
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <cmath>
-#include <iostream>
+#include <SFML/Graphics/Shader.hpp>
 
-// Rope configuration
-struct RopeConfig
+const int WINDOW_WIDTH = 800;
+const int WINDOW_HEIGHT = 600;
+const float PLAYER_SPEED = 300.f;
+const float JUMP_VELOCITY = -400.f;
+const float GRAVITY = 981.f;
+const float BULLET_SPEED = 800.f;
+const int VOXEL_SIZE = 4;                    // Size of each "2D voxel"
+const float DRAW_RADIUS = 3.0f * VOXEL_SIZE; // Radius for voxel spawning
+const float STEP_HEIGHT = VOXEL_SIZE * 1.0f; // Maximum height player can automatically step up
+const float GLOW_STRENGTH = 1000.0f;
+const float EXPLOSION_RADIUS = VOXEL_SIZE * 4.0f;
+const float PARTICLE_LIFETIME = 1.2f;
+const float SCREEN_SHAKE_DURATION = 0.2f;
+const float SCREEN_SHAKE_INTENSITY = 8.0f;
+
+// Helper functions for vector operations
+float vectorLength(const sf::Vector2f &vec)
 {
-    static constexpr int NUM_POINTS = 40;            // Number of points in rope
-    static constexpr float POINT_SPACING = 15.0f;    // Space between points
-    static constexpr float GRAVITY = 1000.0f;        // Gravity strength
-    static constexpr float POINT_SIZE = 0.0f;        // Visual size of points
-    static constexpr int CONSTRAINT_ITERATIONS = 50; // Physics iteration count
-    static constexpr float DAMPING = 1.0f;           // Velocity damping (1.0 = no damping)
-    static constexpr float START_X = 400.0f;         // Starting X position
-    static constexpr float START_Y = 100.0f;         // Starting Y position
-    static constexpr float ROPE_THICKNESS = 2.0f;    // Thickness of the rope
-};
+    return std::sqrt(vec.x * vec.x + vec.y * vec.y);
+}
 
-struct ShaderConfig
+sf::Vector2f normalize(const sf::Vector2f &vec)
 {
-    static constexpr float DEFAULT_PIXEL_SIZE = 5.0f;
-    static constexpr float DEFAULT_CRT_CURVE = 0.0f;
-    static constexpr float DEFAULT_SCANLINE = 0.2f;
-    static constexpr float DEFAULT_CHROMATIC = 0.3f;
-};
+    float length = vectorLength(vec);
+    return length > 0 ? vec / length : vec;
+}
 
-class Point
-{
-public:
-    sf::Vector2f position;
-    sf::Vector2f oldPosition;
-    bool isLocked;
-
-    Point(float x, float y, bool locked = false)
-        : position(x, y), oldPosition(x, y), isLocked(locked) {}
-
-    void update(float dt)
-    {
-        if (!isLocked)
-        {
-            sf::Vector2f velocity = (position - oldPosition) * RopeConfig::DAMPING;
-            oldPosition = position;
-            position += velocity + sf::Vector2f(0.0f, RopeConfig::GRAVITY) * (dt * dt);
-        }
-    }
-};
-
-class Stick
+class Player
 {
 public:
-    Point *pointA;
-    Point *pointB;
-    float length;
+    sf::RectangleShape shape;
+    sf::Vector2f velocity;
+    bool isJumping;
 
-    Stick(Point *a, Point *b) : pointA(a), pointB(b)
+    Player() : isJumping(false)
     {
-        length = std::sqrt(pow(a->position.x - b->position.x, 2) +
-                           pow(a->position.y - b->position.y, 2));
-    }
-
-    void solve()
-    {
-        sf::Vector2f delta = pointB->position - pointA->position;
-        float currentLength = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-        float diff = (currentLength - length) / currentLength;
-
-        if (!pointA->isLocked)
-            pointA->position += delta * 0.5f * diff;
-        if (!pointB->isLocked)
-            pointB->position -= delta * 0.5f * diff;
+        shape.setSize(sf::Vector2f(30.f, 30.f));
+        shape.setFillColor(sf::Color::Green);
+        shape.setPosition(100.f, WINDOW_HEIGHT - 100.f);
+        velocity = sf::Vector2f(0.f, 0.f);
     }
 };
 
-class Obstacle
+class Bullet
+{
+public:
+    sf::RectangleShape shape;
+    sf::Vector2f velocity;
+
+    Bullet(const sf::Vector2f &pos, const sf::Vector2f &vel) : velocity(vel)
+    {
+        shape.setSize(sf::Vector2f(5.f, 5.f));
+        shape.setFillColor(sf::Color::Yellow);
+        shape.setPosition(pos);
+    }
+};
+
+class Voxel
+{
+public:
+    sf::RectangleShape shape;
+
+    Voxel(float x, float y)
+    {
+        shape.setSize(sf::Vector2f(VOXEL_SIZE, VOXEL_SIZE));
+        shape.setFillColor(sf::Color::White);
+        shape.setPosition(x, y);
+    }
+};
+
+class Particle
 {
 public:
     sf::CircleShape shape;
-    float radius;
+    sf::Vector2f velocity;
+    float lifetime;
 
-    Obstacle(float x, float y, float r) : radius(r)
+    Particle(const sf::Vector2f &pos, const sf::Vector2f &vel, const sf::Color &color)
+        : velocity(vel), lifetime(PARTICLE_LIFETIME)
     {
-        shape.setRadius(r);
-        shape.setPosition(x, y);
-        shape.setFillColor(sf::Color::Red);
-        shape.setOrigin(r, r);
+        shape.setRadius(2.f);
+        shape.setFillColor(color);
+        shape.setPosition(pos);
     }
 
-    bool checkCollision(Point &point)
+    bool update(float deltaTime)
     {
-        sf::Vector2f center = shape.getPosition();
-        sf::Vector2f diff = point.position - center;
-        float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
-
-        if (dist < radius)
-        {
-            float angle = std::atan2(diff.y, diff.x);
-            point.position.x = center.x + std::cos(angle) * radius;
-            point.position.y = center.y + std::sin(angle) * radius;
-            return true;
-        }
-        return false;
+        lifetime -= deltaTime;
+        shape.move(velocity * deltaTime);
+        shape.setFillColor(sf::Color(
+            shape.getFillColor().r,
+            shape.getFillColor().g,
+            shape.getFillColor().b,
+            static_cast<sf::Uint8>(255 * (lifetime / PARTICLE_LIFETIME))));
+        return lifetime > 0;
     }
 };
 
-int main()
+class Game
 {
-    sf::RenderWindow window(sf::VideoMode(800, 600), "Verlet Rope Simulation");
-    window.setFramerateLimit(100);
+private:
+    sf::RenderWindow window;
+    Player player;
+    std::vector<Bullet> bullets;
+    std::vector<Voxel> voxels;
+    std::vector<Particle> particles;
+    bool isDrawing;
+    sf::Shader backgroundShader;
+    sf::Shader glowShader;
+    sf::RenderTexture bulletLayer;
+    sf::Clock shaderClock;
+    float screenShakeTime = 0.0f;
+    sf::Vector2f screenShakeOffset;
 
-    // Initialize shader and render texture
-    sf::Shader shader;
-    if (!shader.loadFromFile("combined.frag", sf::Shader::Fragment))
+public:
+    Game() : window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "2D Shooter"), isDrawing(false)
     {
-        std::cout << "Error loading shader\n";
-        return -1;
+        window.setFramerateLimit(60);
+
+        // Initialize shaders
+        if (!sf::Shader::isAvailable())
+        {
+            throw std::runtime_error("Shaders are not available!");
+        }
+
+        if (!backgroundShader.loadFromFile("shaders/background.frag", sf::Shader::Fragment))
+        {
+            throw std::runtime_error("Could not load background shader!");
+        }
+
+        if (!glowShader.loadFromFile("shaders/glow.frag", sf::Shader::Fragment))
+        {
+            throw std::runtime_error("Could not load glow shader!");
+        }
+
+        // Initialize render texture for bullet layer
+        bulletLayer.create(WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        // Set shader parameters
+        backgroundShader.setUniform("resolution", sf::Vector2f(WINDOW_WIDTH, WINDOW_HEIGHT));
+        glowShader.setUniform("glowStrength", GLOW_STRENGTH);
     }
 
-    sf::RenderTexture renderTexture;
-    if (!renderTexture.create(800, 600))
+    void run()
     {
-        std::cout << "Error creating render texture\n";
-        return -1;
+        sf::Clock clock;
+
+        while (window.isOpen())
+        {
+            sf::Time deltaTime = clock.restart();
+            handleEvents();
+            update(deltaTime.asSeconds());
+            render();
+        }
     }
 
-    float pixelSize = ShaderConfig::DEFAULT_PIXEL_SIZE;
-    float crtCurve = ShaderConfig::DEFAULT_CRT_CURVE;
-    float scanlineIntensity = ShaderConfig::DEFAULT_SCANLINE;
-    float chromaticIntensity = ShaderConfig::DEFAULT_CHROMATIC;
-    sf::Clock clock;
-
-    shader.setUniform("resolution", sf::Vector2f(800, 600));
-    shader.setUniform("pixel_size", pixelSize);
-    shader.setUniform("crt_curve", crtCurve);
-    shader.setUniform("scanline_intensity", scanlineIntensity);
-    shader.setUniform("chromatic_intensity", chromaticIntensity);
-
-    // Create rope
-    std::vector<Point> points;
-    std::vector<Stick> sticks;
-
-    // Initialize points using constants
-    for (int i = 0; i < RopeConfig::NUM_POINTS; i++)
+private:
+    bool checkVoxelCollision(const sf::FloatRect &bounds)
     {
-        points.emplace_back(RopeConfig::START_X,
-                            RopeConfig::START_Y + i * RopeConfig::POINT_SPACING,
-                            i == 0);
+        for (const auto &voxel : voxels)
+        {
+            if (bounds.intersects(voxel.shape.getGlobalBounds()))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
-    // Create sticks between points
-    for (int i = 0; i < RopeConfig::NUM_POINTS - 1; i++)
+    bool canStepUp(const sf::Vector2f &pos)
     {
-        sticks.emplace_back(&points[i], &points[i + 1]);
+        sf::FloatRect playerBounds = player.shape.getGlobalBounds();
+
+        // Check if there's a block in front of us
+        playerBounds.left = pos.x;
+        playerBounds.top = pos.y;
+        if (!checkVoxelCollision(playerBounds))
+        {
+            return false; // No need to step if no collision
+        }
+
+        // Try stepping up
+        playerBounds.top = pos.y - STEP_HEIGHT;
+        return !checkVoxelCollision(playerBounds);
     }
 
-    // Create obstacles
-    std::vector<Obstacle> obstacles;
-    obstacles.emplace_back(400, 300, 50);
-    obstacles.emplace_back(300, 400, 40);
+    void spawnVoxelsInRadius(float centerX, float centerY)
+    {
+        for (float x = -DRAW_RADIUS; x <= DRAW_RADIUS; x += VOXEL_SIZE)
+        {
+            for (float y = -DRAW_RADIUS; y <= DRAW_RADIUS; y += VOXEL_SIZE)
+            {
+                float distance = std::sqrt(x * x + y * y);
+                if (distance <= DRAW_RADIUS)
+                {
+                    float snapX = round((centerX + x) / VOXEL_SIZE) * VOXEL_SIZE;
+                    float snapY = round((centerY + y) / VOXEL_SIZE) * VOXEL_SIZE;
 
-    // Simulation variables
-    const float dt = 1.0f / 100.0f;
-    const int iterations = RopeConfig::CONSTRAINT_ITERATIONS;
-    bool isDragging = false;
+                    // Check if voxel already exists
+                    bool voxelExists = false;
+                    for (const auto &voxel : voxels)
+                    {
+                        if (voxel.shape.getPosition().x == snapX &&
+                            voxel.shape.getPosition().y == snapY)
+                        {
+                            voxelExists = true;
+                            break;
+                        }
+                    }
 
-    while (window.isOpen())
+                    if (!voxelExists)
+                    {
+                        voxels.emplace_back(snapX, snapY);
+                    }
+                }
+            }
+        }
+    }
+
+    void handleCollisions(sf::Vector2f &newPos, float deltaTime)
+    {
+        sf::FloatRect playerBounds = player.shape.getGlobalBounds();
+        sf::Vector2f oldPos = player.shape.getPosition();
+
+        // First, try horizontal movement
+        playerBounds.left = newPos.x;
+        playerBounds.top = oldPos.y;
+        if (checkVoxelCollision(playerBounds))
+        {
+            // Try stepping up before blocking horizontal movement
+            if (canStepUp(sf::Vector2f(newPos.x, oldPos.y)))
+            {
+                // Move up by step height
+                newPos.y = oldPos.y - STEP_HEIGHT;
+            }
+            else
+            {
+                // Can't step up, block horizontal movement
+                newPos.x = oldPos.x;
+                player.velocity.x = 0;
+            }
+        }
+
+        // Then, try vertical movement
+        playerBounds.left = newPos.x;
+        playerBounds.top = newPos.y;
+        if (checkVoxelCollision(playerBounds))
+        {
+            if (player.velocity.y > 0)
+            {
+                newPos.y = oldPos.y;
+                player.velocity.y = 0;
+                player.isJumping = false;
+            }
+            else if (player.velocity.y < 0)
+            {
+                newPos.y = oldPos.y;
+                player.velocity.y = 0;
+            }
+        }
+
+        // Apply gravity after stepping
+        if (!checkVoxelCollision(playerBounds))
+        {
+            sf::FloatRect groundCheck = playerBounds;
+            groundCheck.top += 1.0f;
+            if (!checkVoxelCollision(groundCheck))
+            {
+                player.isJumping = true;
+            }
+        }
+    }
+
+    void handleEvents()
     {
         sf::Event event;
         while (window.pollEvent(event))
         {
             if (event.type == sf::Event::Closed)
                 window.close();
-            else if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left)
+
+            if (event.type == sf::Event::MouseButtonPressed)
             {
-                isDragging = true;
-            }
-            else if (event.type == sf::Event::MouseButtonReleased && event.mouseButton.button == sf::Mouse::Left)
-            {
-                isDragging = false;
-            }
-            else if (event.type == sf::Event::KeyPressed)
-            {
-                switch (event.key.code)
+                if (event.mouseButton.button == sf::Mouse::Left)
                 {
-                case sf::Keyboard::Up:
-                    pixelSize = std::min(pixelSize + 1.0f, 32.0f);
-                    shader.setUniform("pixel_size", pixelSize);
-                    break;
-                case sf::Keyboard::Down:
-                    pixelSize = std::max(pixelSize - 1.0f, 1.0f);
-                    shader.setUniform("pixel_size", pixelSize);
-                    break;
-                case sf::Keyboard::Q:
-                    crtCurve = std::min(crtCurve + 0.1f, 1.0f);
-                    shader.setUniform("crt_curve", crtCurve);
-                    break;
-                case sf::Keyboard::A:
-                    crtCurve = std::max(crtCurve - 0.1f, 0.0f);
-                    shader.setUniform("crt_curve", crtCurve);
-                    break;
-                case sf::Keyboard::W:
-                    scanlineIntensity = std::min(scanlineIntensity + 0.1f, 1.0f);
-                    shader.setUniform("scanline_intensity", scanlineIntensity);
-                    break;
-                case sf::Keyboard::S:
-                    scanlineIntensity = std::max(scanlineIntensity - 0.1f, 0.0f);
-                    shader.setUniform("scanline_intensity", scanlineIntensity);
-                    break;
-                case sf::Keyboard::E:
-                    chromaticIntensity = std::min(chromaticIntensity + 0.1f, 1.0f);
-                    shader.setUniform("chromatic_intensity", chromaticIntensity);
-                    break;
-                case sf::Keyboard::D:
-                    chromaticIntensity = std::max(chromaticIntensity - 0.1f, 0.0f);
-                    shader.setUniform("chromatic_intensity", chromaticIntensity);
-                    break;
+                    isDrawing = true;
+                }
+            }
+            if (event.type == sf::Event::MouseButtonReleased)
+            {
+                if (event.mouseButton.button == sf::Mouse::Left)
+                {
+                    isDrawing = false;
+                }
+            }
+            if (event.type == sf::Event::MouseButtonPressed)
+            {
+                if (event.mouseButton.button == sf::Mouse::Right)
+                {
+                    // Shoot bullet
+                    sf::Vector2i mousePos = sf::Mouse::getPosition(window);
+                    sf::Vector2f playerCenter = player.shape.getPosition() +
+                                                sf::Vector2f(player.shape.getSize().x / 2, player.shape.getSize().y / 2);
+
+                    sf::Vector2f direction = sf::Vector2f(mousePos.x - playerCenter.x,
+                                                          mousePos.y - playerCenter.y);
+                    float length = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+                    direction /= length;
+
+                    bullets.emplace_back(playerCenter, direction * BULLET_SPEED);
                 }
             }
         }
 
-        // Update anchor point position to mouse position when dragging
-        if (isDragging)
+        // Handle continuous drawing while mouse is held
+        if (isDrawing)
         {
             sf::Vector2i mousePos = sf::Mouse::getPosition(window);
-            points[0].position = window.mapPixelToCoords(mousePos);
-            points[0].oldPosition = points[0].position;
+            spawnVoxelsInRadius(mousePos.x, mousePos.y);
         }
-
-        // Update points
-        for (auto &point : points)
-        {
-            point.update(dt);
-        }
-
-        // Solve constraints
-        for (int i = 0; i < iterations; i++)
-        {
-            for (auto &stick : sticks)
-            {
-                stick.solve();
-            }
-
-            // Check obstacle collisions
-            for (auto &point : points)
-            {
-                for (auto &obstacle : obstacles)
-                {
-                    obstacle.checkCollision(point);
-                }
-            }
-        }
-
-        // Render to texture
-        renderTexture.clear(sf::Color::Black);
-
-        // Draw obstacles to texture
-        for (const auto &obstacle : obstacles)
-        {
-            renderTexture.draw(obstacle.shape);
-        }
-
-        // Draw sticks to texture (thick lines)
-        for (const auto &stick : sticks)
-        {
-            sf::Vector2f direction = stick.pointB->position - stick.pointA->position;
-            float length = std::sqrt(direction.x * direction.x + direction.y * direction.y);
-            if (length > 0)
-            {
-                direction /= length;
-                sf::Vector2f normal(-direction.y, direction.x);
-                normal *= RopeConfig::ROPE_THICKNESS;
-
-                sf::ConvexShape line;
-                line.setPointCount(4);
-                line.setPoint(0, stick.pointA->position + normal);
-                line.setPoint(1, stick.pointB->position + normal);
-                line.setPoint(2, stick.pointB->position - normal);
-                line.setPoint(3, stick.pointA->position - normal);
-                line.setFillColor(sf::Color::White);
-                renderTexture.draw(line);
-            }
-        }
-
-        // Draw points to texture
-        for (const auto &point : points)
-        {
-            sf::CircleShape circle(RopeConfig::POINT_SIZE);
-            circle.setFillColor(sf::Color::White);
-            circle.setPosition(point.position);
-            circle.setOrigin(RopeConfig::POINT_SIZE, RopeConfig::POINT_SIZE);
-            renderTexture.draw(circle);
-        }
-
-        renderTexture.display();
-
-        // Final render with shader
-        window.clear();
-        sf::Sprite sprite(renderTexture.getTexture());
-        shader.setUniform("texture", sf::Shader::CurrentTexture);
-        shader.setUniform("time", clock.getElapsedTime().asSeconds());
-        window.draw(sprite, &shader);
-        window.display();
     }
 
+    void createExplosion(const sf::Vector2f &position)
+    {
+        // Screen shake
+        screenShakeTime = SCREEN_SHAKE_DURATION;
+
+        // Create explosion particles
+        for (int i = 0; i < 20; ++i)
+        {
+            float angle = (rand() % 360) * 3.14159f / 180.f;
+            float speed = 100.f + (rand() % 100);
+            sf::Vector2f velocity(cos(angle) * speed, sin(angle) * speed);
+            particles.emplace_back(position, velocity, sf::Color(255, 200, 0));
+        }
+
+        // Destroy nearby voxels
+        for (auto it = voxels.begin(); it != voxels.end();)
+        {
+            sf::Vector2f voxelPos = it->shape.getPosition();
+            float dx = voxelPos.x - position.x;
+            float dy = voxelPos.y - position.y;
+            float distance = sqrt(dx * dx + dy * dy);
+
+            if (distance < EXPLOSION_RADIUS)
+            {
+                // Create debris particles
+                for (int i = 0; i < 3; ++i)
+                {
+                    float angle = (rand() % 360) * 3.14159f / 180.f;
+                    float speed = 50.f + (rand() % 50);
+                    sf::Vector2f velocity(cos(angle) * speed, sin(angle) * speed);
+                    particles.emplace_back(voxelPos, velocity, sf::Color::White);
+                }
+                it = voxels.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    void updateScreenShake(float deltaTime)
+    {
+        if (screenShakeTime > 0)
+        {
+            screenShakeTime -= deltaTime;
+            float intensity = (screenShakeTime / SCREEN_SHAKE_DURATION) * SCREEN_SHAKE_INTENSITY;
+            screenShakeOffset = sf::Vector2f(
+                (rand() % 100 - 50) * 0.01f * intensity,
+                (rand() % 100 - 50) * 0.01f * intensity);
+        }
+        else
+        {
+            screenShakeOffset = sf::Vector2f(0, 0);
+        }
+    }
+
+    void update(float deltaTime)
+    {
+        // Player movement
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::A))
+            player.velocity.x = -PLAYER_SPEED;
+        else if (sf::Keyboard::isKeyPressed(sf::Keyboard::D))
+            player.velocity.x = PLAYER_SPEED;
+        else
+            player.velocity.x = 0;
+
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space) && !player.isJumping)
+        {
+            player.velocity.y = JUMP_VELOCITY;
+            player.isJumping = true;
+        }
+
+        // Apply gravity
+        player.velocity.y += GRAVITY * deltaTime;
+
+        // Update player position
+        sf::Vector2f newPos = player.shape.getPosition();
+        newPos += player.velocity * deltaTime;
+
+        handleCollisions(newPos, deltaTime);
+
+        // Window bounds checking
+        if (newPos.x < 0)
+            newPos.x = 0;
+        if (newPos.x > WINDOW_WIDTH - player.shape.getSize().x)
+            newPos.x = WINDOW_WIDTH - player.shape.getSize().x;
+        if (newPos.y > WINDOW_HEIGHT - player.shape.getSize().y)
+        {
+            newPos.y = WINDOW_HEIGHT - player.shape.getSize().y;
+            player.velocity.y = 0;
+            player.isJumping = false;
+        }
+
+        player.shape.setPosition(newPos);
+
+        // Update bullets
+        for (auto it = bullets.begin(); it != bullets.end();)
+        {
+            it->shape.move(it->velocity * deltaTime);
+
+            // Create bullet trail particles
+            if (rand() % 2 == 0)
+            {
+                particles.emplace_back(
+                    it->shape.getPosition(),
+                    sf::Vector2f(0, 0),
+                    sf::Color(255, 255, 0, 128));
+            }
+
+            // Check bullet collision with voxels
+            bool bulletHit = false;
+            for (const auto &voxel : voxels)
+            {
+                if (it->shape.getGlobalBounds().intersects(voxel.shape.getGlobalBounds()))
+                {
+                    createExplosion(it->shape.getPosition());
+                    bulletHit = true;
+                    break;
+                }
+            }
+
+            // Remove bullets that are out of bounds or hit voxels
+            if (bulletHit ||
+                it->shape.getPosition().x < 0 ||
+                it->shape.getPosition().x > WINDOW_WIDTH ||
+                it->shape.getPosition().y < 0 ||
+                it->shape.getPosition().y > WINDOW_HEIGHT)
+            {
+                it = bullets.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        // Update screen shake
+        updateScreenShake(deltaTime);
+
+        // Update particles
+        for (auto it = particles.begin(); it != particles.end();)
+        {
+            if (!it->update(deltaTime))
+            {
+                it = particles.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    void render()
+    {
+        // Clear all layers
+        window.clear();
+        bulletLayer.clear(sf::Color::Transparent);
+
+        // Update background shader time
+        backgroundShader.setUniform("time", shaderClock.getElapsedTime().asSeconds());
+
+        // Draw background with shader
+        sf::RectangleShape background(sf::Vector2f(WINDOW_WIDTH, WINDOW_HEIGHT));
+        window.draw(background, &backgroundShader);
+
+        // Apply screen shake to view
+        sf::View view = window.getDefaultView();
+        view.move(screenShakeOffset);
+        window.setView(view);
+
+        // Draw voxels
+        for (const auto &voxel : voxels)
+        {
+            window.draw(voxel.shape);
+        }
+
+        // Draw bullets to separate layer with glow shader
+        for (const auto &bullet : bullets)
+        {
+            bulletLayer.draw(bullet.shape);
+        }
+        bulletLayer.display();
+
+        // Draw bullet layer with glow effect
+        sf::Sprite bulletSprite(bulletLayer.getTexture());
+        window.draw(bulletSprite, &glowShader);
+
+        // Draw particles
+        for (const auto &particle : particles)
+        {
+            window.draw(particle.shape);
+        }
+
+        // Draw player
+        window.draw(player.shape);
+
+        window.display();
+    }
+};
+
+int main()
+{
+    Game game;
+    game.run();
     return 0;
 }
